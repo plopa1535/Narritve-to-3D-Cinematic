@@ -1,4 +1,4 @@
-import { Download, Share2, RotateCcw, Play } from 'lucide-react';
+import { Download, Share2, RotateCcw } from 'lucide-react';
 
 interface VideoPlayerProps {
   videoUrl: string;

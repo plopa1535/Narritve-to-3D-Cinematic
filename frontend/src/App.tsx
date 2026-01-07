@@ -20,7 +20,7 @@ export default function App() {
 
   // 상태 폴링
   useEffect(() => {
-    let interval: NodeJS.Timeout;
+    let interval: ReturnType<typeof setInterval>;
 
     if (projectId && (status.status === 'analyzing' || status.status === 'generating')) {
       interval = setInterval(async () => {
