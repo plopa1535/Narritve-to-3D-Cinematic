@@ -31,7 +31,7 @@ class GeminiService:
     def __init__(self):
         self.api_key = settings.gemini_api_key
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
-        self.model = "gemini-1.5-flash-001"
+        self.model = "gemini-2.0-flash"
 
     async def analyze_image(self, image_data: bytes, photo_id: str) -> dict:
         """단일 이미지 분석"""
