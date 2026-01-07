@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: personal-shorts
+    runtime: python
+    rootDir: backend
+    buildCommand: |
+      pip install -r requirements.txt &&
+      cd ../frontend &&
+      npm install &&
+      npm run build &&
+      cd ../backend &&
+      rm -rf static &&
+      cp -r ../frontend/dist static
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: REPLICATE_API_KEY
+        sync: false
+    healthCheckPath: /health
+    autoDeploy: true
