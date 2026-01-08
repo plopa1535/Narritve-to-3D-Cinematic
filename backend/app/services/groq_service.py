@@ -53,7 +53,7 @@ class GroqService:
     def __init__(self):
         self.api_key = settings.groq_api_key
         self.base_url = "https://api.groq.com/openai/v1"
-        self.model = "qwen-2.5-72b"  # 무료 Qwen 모델
+        self.model = "llama-3.3-70b-versatile"  # 무료 LLaMA 모델
 
     async def generate_script(
         self, image_analysis: dict, narrative: str, style: str
