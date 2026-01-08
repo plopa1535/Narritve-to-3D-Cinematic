@@ -1,6 +1,7 @@
 import httpx
 import base64
 import json
+import asyncio
 from ..config import get_settings
 
 settings = get_settings()
@@ -25,12 +26,12 @@ IMAGE_ANALYSIS_PROMPT = """당신은 사진 분석 전문가입니다. 업로드
 
 
 class GeminiService:
-    """Groq LLaVA API 서비스 (이미지 분석용) - 무료"""
+    """Google Gemini API 서비스 (이미지 분석용)"""
 
     def __init__(self):
-        self.api_key = settings.groq_api_key
-        self.base_url = "https://api.groq.com/openai/v1"
-        self.model = "llama-3.2-11b-vision-preview"
+        self.api_key = settings.gemini_api_key
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        self.model = "gemini-2.0-flash"
 
     async def analyze_image(self, image_data: bytes, photo_id: str) -> dict:
         """단일 이미지 분석"""
@@ -38,40 +39,37 @@ class GeminiService:
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
+                f"{self.base_url}/models/{self.model}:generateContent",
+                params={"key": self.api_key},
+                headers={"Content-Type": "application/json"},
                 json={
-                    "model": self.model,
-                    "messages": [
+                    "contents": [
                         {
-                            "role": "user",
-                            "content": [
+                            "parts": [
                                 {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{base64_image}"
+                                    "inline_data": {
+                                        "mime_type": "image/jpeg",
+                                        "data": base64_image,
                                     }
                                 },
-                                {
-                                    "type": "text",
-                                    "text": IMAGE_ANALYSIS_PROMPT
-                                }
+                                {"text": IMAGE_ANALYSIS_PROMPT},
                             ]
                         }
                     ],
-                    "temperature": 0.1,
-                    "max_tokens": 1024,
+                    "generationConfig": {
+                        "temperature": 0.1,
+                        "maxOutputTokens": 1024,
+                    },
                 },
             )
 
             if response.status_code != 200:
-                raise Exception(f"Groq LLaVA API error: {response.text}")
+                raise Exception(f"Gemini API error: {response.text}")
 
             result = response.json()
-            text_content = result["choices"][0]["message"]["content"]
+
+            # 응답에서 텍스트 추출
+            text_content = result["candidates"][0]["content"]["parts"][0]["text"]
 
             # JSON 파싱 (마크다운 코드 블록 제거)
             if "```json" in text_content:
@@ -79,28 +77,25 @@ class GeminiService:
             elif "```" in text_content:
                 text_content = text_content.split("```")[1].split("```")[0]
 
-            try:
-                analysis = json.loads(text_content.strip())
-            except json.JSONDecodeError:
-                # JSON 파싱 실패시 기본값 반환
-                analysis = {
-                    "people": {"count": 0, "relationship": "unknown", "emotions": []},
-                    "setting": {"type": "unknown", "indoor": True, "time": "unknown", "season": "unknown"},
-                    "mood": "neutral",
-                    "colors": [],
-                    "key_elements": []
-                }
-
+            analysis = json.loads(text_content.strip())
             analysis["photo_id"] = photo_id
+
             return analysis
 
     async def analyze_all_images(self, images: list[tuple[str, bytes]]) -> dict:
-        """여러 이미지 분석 및 전체 테마 추출"""
+        """여러 이미지 분석 및 전체 테마 추출 (rate limit 대응)"""
         analyses = []
 
-        for photo_id, image_data in images:
+        for i, (photo_id, image_data) in enumerate(images):
+            # 첫 번째 이후 요청은 5초 대기 (rate limit 방지)
+            if i > 0:
+                await asyncio.sleep(5)
+
             analysis = await self.analyze_image(image_data, photo_id)
             analyses.append(analysis)
+
+        # 5초 대기 후 요약 요청
+        await asyncio.sleep(5)
 
         # 전체 분석 요약
         overall_analysis = await self._summarize_analyses(analyses)
@@ -123,24 +118,23 @@ class GeminiService:
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
+                f"{self.base_url}/models/{self.model}:generateContent",
+                params={"key": self.api_key},
+                headers={"Content-Type": "application/json"},
                 json={
-                    "model": "llama-3.3-70b-versatile",  # 텍스트 요약은 LLaMA 사용
-                    "messages": [{"role": "user", "content": summary_prompt}],
-                    "temperature": 0.1,
-                    "max_tokens": 512,
+                    "contents": [{"parts": [{"text": summary_prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.1,
+                        "maxOutputTokens": 512,
+                    },
                 },
             )
 
             if response.status_code != 200:
-                raise Exception(f"Groq API error: {response.text}")
+                raise Exception(f"Gemini API error: {response.text}")
 
             result = response.json()
-            text_content = result["choices"][0]["message"]["content"]
+            text_content = result["candidates"][0]["content"]["parts"][0]["text"]
 
             # JSON 파싱
             if "```json" in text_content:
@@ -148,14 +142,7 @@ class GeminiService:
             elif "```" in text_content:
                 text_content = text_content.split("```")[1].split("```")[0]
 
-            try:
-                return json.loads(text_content.strip())
-            except json.JSONDecodeError:
-                return {
-                    "overall_theme": "개인 스토리",
-                    "suggested_narrative_arc": "시작 → 전개 → 결말",
-                    "emotional_journey": ["기대", "경험", "회상"]
-                }
+            return json.loads(text_content.strip())
 
 
 gemini_service = GeminiService()
