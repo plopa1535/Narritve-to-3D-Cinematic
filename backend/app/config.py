@@ -3,9 +3,9 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    # Gemini API (이미지 분석 - 무료)
-    # https://aistudio.google.com/app/apikey
-    gemini_api_key: str = ""
+    # Google Vision API (이미지 분석)
+    # https://console.cloud.google.com/apis/credentials
+    google_vision_api_key: str = ""
 
     # Groq API (스크립트 생성 - 무료)
     # https://console.groq.com/keys

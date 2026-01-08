@@ -1,110 +1,136 @@
 import httpx
 import base64
 import json
-import asyncio
 from ..config import get_settings
 
 settings = get_settings()
 
-IMAGE_ANALYSIS_PROMPT = """당신은 사진 분석 전문가입니다. 업로드된 사진을 분석하여 다음 정보를 JSON 형식으로 추출해주세요.
 
-## 분석 항목
-1. **인물 정보**: 등장인물 수, 추정 관계, 표정, 포즈
-2. **장소/배경**: 실내/실외, 장소 유형, 시간대, 계절
-3. **감정 톤**: 행복, 슬픔, 평화, 설렘, 그리움 등
-4. **시각적 요소**: 주요 색상, 조명, 구도
-5. **특별한 요소**: 특별한 이벤트, 상징적 물체
-
-## 출력 형식 (반드시 이 JSON 형식으로만 응답, 다른 텍스트 없이)
-{
-  "people": {"count": 0, "relationship": "", "emotions": []},
-  "setting": {"type": "", "indoor": true, "time": "", "season": ""},
-  "mood": "",
-  "colors": [],
-  "key_elements": []
-}"""
-
-
-class GeminiService:
-    """Google Gemini API 서비스 (이미지 분석용)"""
+class VisionService:
+    """Google Cloud Vision API 서비스 (이미지 분석용)"""
 
     def __init__(self):
-        self.api_key = settings.gemini_api_key
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta"
-        self.model = "gemini-2.0-flash"
+        self.api_key = settings.google_vision_api_key
+        self.base_url = "https://vision.googleapis.com/v1"
 
     async def analyze_image(self, image_data: bytes, photo_id: str) -> dict:
-        """단일 이미지 분석"""
+        """단일 이미지 분석 - Vision API로 라벨, 얼굴, 색상 등 추출"""
         base64_image = base64.b64encode(image_data).decode("utf-8")
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{self.base_url}/models/{self.model}:generateContent",
+                f"{self.base_url}/images:annotate",
                 params={"key": self.api_key},
                 headers={"Content-Type": "application/json"},
                 json={
-                    "contents": [
+                    "requests": [
                         {
-                            "parts": [
-                                {
-                                    "inline_data": {
-                                        "mime_type": "image/jpeg",
-                                        "data": base64_image,
-                                    }
-                                },
-                                {"text": IMAGE_ANALYSIS_PROMPT},
-                            ]
+                            "image": {"content": base64_image},
+                            "features": [
+                                {"type": "LABEL_DETECTION", "maxResults": 10},
+                                {"type": "FACE_DETECTION", "maxResults": 10},
+                                {"type": "IMAGE_PROPERTIES"},
+                                {"type": "LANDMARK_DETECTION", "maxResults": 5},
+                                {"type": "OBJECT_LOCALIZATION", "maxResults": 10},
+                            ],
                         }
-                    ],
-                    "generationConfig": {
-                        "temperature": 0.1,
-                        "maxOutputTokens": 1024,
-                    },
+                    ]
                 },
             )
 
             if response.status_code != 200:
-                raise Exception(f"Gemini API error: {response.text}")
+                raise Exception(f"Vision API error: {response.text}")
 
             result = response.json()
+            response_data = result.get("responses", [{}])[0]
 
-            # 응답에서 텍스트 추출
-            text_content = result["candidates"][0]["content"]["parts"][0]["text"]
-
-            # JSON 파싱 (마크다운 코드 블록 제거)
-            if "```json" in text_content:
-                text_content = text_content.split("```json")[1].split("```")[0]
-            elif "```" in text_content:
-                text_content = text_content.split("```")[1].split("```")[0]
-
-            analysis = json.loads(text_content.strip())
+            # Vision API 결과를 우리 형식으로 변환
+            analysis = self._parse_vision_response(response_data)
             analysis["photo_id"] = photo_id
 
             return analysis
 
+    def _parse_vision_response(self, response: dict) -> dict:
+        """Vision API 응답을 분석 형식으로 변환"""
+        # 라벨 추출
+        labels = [label.get("description", "") for label in response.get("labelAnnotations", [])]
+
+        # 얼굴 분석
+        faces = response.get("faceAnnotations", [])
+        face_count = len(faces)
+        emotions = []
+        for face in faces:
+            if face.get("joyLikelihood") in ["LIKELY", "VERY_LIKELY"]:
+                emotions.append("happy")
+            if face.get("sorrowLikelihood") in ["LIKELY", "VERY_LIKELY"]:
+                emotions.append("sad")
+            if face.get("surpriseLikelihood") in ["LIKELY", "VERY_LIKELY"]:
+                emotions.append("surprised")
+
+        # 색상 추출
+        colors = []
+        image_props = response.get("imagePropertiesAnnotation", {})
+        dominant_colors = image_props.get("dominantColors", {}).get("colors", [])
+        for color_info in dominant_colors[:5]:
+            color = color_info.get("color", {})
+            r, g, b = color.get("red", 0), color.get("green", 0), color.get("blue", 0)
+            colors.append(f"rgb({int(r)},{int(g)},{int(b)})")
+
+        # 랜드마크 추출
+        landmarks = [lm.get("description", "") for lm in response.get("landmarkAnnotations", [])]
+
+        # 객체 추출
+        objects = [obj.get("name", "") for obj in response.get("localizedObjectAnnotations", [])]
+
+        # 실내/실외 판단
+        indoor_keywords = ["room", "interior", "indoor", "furniture", "ceiling"]
+        outdoor_keywords = ["sky", "outdoor", "nature", "tree", "building", "street"]
+        indoor = any(kw in " ".join(labels).lower() for kw in indoor_keywords)
+        outdoor = any(kw in " ".join(labels).lower() for kw in outdoor_keywords)
+
+        # 분위기 추정
+        mood = "neutral"
+        if emotions:
+            if "happy" in emotions:
+                mood = "joyful"
+            elif "sad" in emotions:
+                mood = "melancholy"
+        elif any(kw in " ".join(labels).lower() for kw in ["sunset", "beach", "nature"]):
+            mood = "peaceful"
+
+        return {
+            "people": {
+                "count": face_count,
+                "relationship": "unknown",
+                "emotions": list(set(emotions)) if emotions else ["neutral"],
+            },
+            "setting": {
+                "type": landmarks[0] if landmarks else (objects[0] if objects else "unknown"),
+                "indoor": indoor and not outdoor,
+                "time": "unknown",
+                "season": "unknown",
+            },
+            "mood": mood,
+            "colors": colors,
+            "key_elements": labels[:5] + objects[:3],
+        }
+
     async def analyze_all_images(self, images: list[tuple[str, bytes]]) -> dict:
-        """여러 이미지 분석 및 전체 테마 추출 (rate limit 대응)"""
+        """여러 이미지 분석 및 전체 테마 추출"""
         analyses = []
 
-        for i, (photo_id, image_data) in enumerate(images):
-            # 첫 번째 이후 요청은 5초 대기 (rate limit 방지)
-            if i > 0:
-                await asyncio.sleep(5)
-
+        for photo_id, image_data in images:
             analysis = await self.analyze_image(image_data, photo_id)
             analyses.append(analysis)
 
-        # 5초 대기 후 요약 요청
-        await asyncio.sleep(5)
-
-        # 전체 분석 요약
-        overall_analysis = await self._summarize_analyses(analyses)
+        # 전체 분석 요약 (Groq 사용)
+        overall_analysis = await self._summarize_with_groq(analyses)
         overall_analysis["photos"] = analyses
 
         return overall_analysis
 
-    async def _summarize_analyses(self, analyses: list[dict]) -> dict:
-        """분석 결과들을 종합하여 전체 테마 추출"""
+    async def _summarize_with_groq(self, analyses: list[dict]) -> dict:
+        """Groq를 사용하여 분석 결과 요약"""
         summary_prompt = f"""다음 사진 분석 결과들을 종합하여 전체 스토리 테마를 추출해주세요.
 
 분석 결과: {json.dumps(analyses, ensure_ascii=False)}
@@ -118,23 +144,29 @@ class GeminiService:
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{self.base_url}/models/{self.model}:generateContent",
-                params={"key": self.api_key},
-                headers={"Content-Type": "application/json"},
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.groq_api_key}",
+                    "Content-Type": "application/json",
+                },
                 json={
-                    "contents": [{"parts": [{"text": summary_prompt}]}],
-                    "generationConfig": {
-                        "temperature": 0.1,
-                        "maxOutputTokens": 512,
-                    },
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [{"role": "user", "content": summary_prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 512,
                 },
             )
 
             if response.status_code != 200:
-                raise Exception(f"Gemini API error: {response.text}")
+                # Groq 실패시 기본값 반환
+                return {
+                    "overall_theme": "개인 스토리",
+                    "suggested_narrative_arc": "시작 → 전개 → 결말",
+                    "emotional_journey": ["기대", "경험", "회상"],
+                }
 
             result = response.json()
-            text_content = result["candidates"][0]["content"]["parts"][0]["text"]
+            text_content = result["choices"][0]["message"]["content"]
 
             # JSON 파싱
             if "```json" in text_content:
@@ -142,7 +174,16 @@ class GeminiService:
             elif "```" in text_content:
                 text_content = text_content.split("```")[1].split("```")[0]
 
-            return json.loads(text_content.strip())
+            try:
+                return json.loads(text_content.strip())
+            except json.JSONDecodeError:
+                return {
+                    "overall_theme": "개인 스토리",
+                    "suggested_narrative_arc": "시작 → 전개 → 결말",
+                    "emotional_journey": ["기대", "경험", "회상"],
+                }
 
 
-gemini_service = GeminiService()
+# 기존 코드 호환성을 위해 이름 유지
+gemini_service = VisionService()
+GeminiService = VisionService
