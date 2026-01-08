@@ -30,7 +30,7 @@ class GeminiService:
     def __init__(self):
         self.api_key = settings.groq_api_key
         self.base_url = "https://api.groq.com/openai/v1"
-        self.model = "llava-v1.5-7b-4096-preview"
+        self.model = "llama-3.2-90b-vision-preview"
 
     async def analyze_image(self, image_data: bytes, photo_id: str) -> dict:
         """단일 이미지 분석"""
